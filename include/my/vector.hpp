@@ -1,21 +1,31 @@
 // my/vector.hpp - YOUR std::vector. This is the only file you need to edit.
 //
-// Run `./cppatlas test` after every change. It tells you which stage you are
-// on and what to fix next; each stage's spec lives at
+// Get graded with `./cppatlas submit`. It sends this file to the cppatlas
+// grader (no local compiler needed), prints a [tester::#N] log for the stage
+// you are on, and advances you when it passes. Each stage's spec lives at
 // https://cppatlas.com/build/vector/<stage-slug>.
+// Optional: `./cppatlas test` builds and runs the same tests locally, which is
+// faster if you have a C++23 compiler and CMake installed.
 //
-// Everything below COMPILES but is deliberately wrong, so the tests fail
+// STAGE 1 (free pass, proves the submit loop works):
+//   1) Uncomment the 5 lines marked with "STAGE 1" below
+//      (3 return statements and 2 data members).
+//   2) Run `./cppatlas submit`.
+//   3) It passes and advances you to stage 2.
+//   The placeholder lines next to them can stay or be deleted; they become dead
+//   code once the marked lines are active.
+//
+// Everything else below COMPILES but is deliberately wrong, so the tests fail
 // cleanly until you implement it.
 //
-//   Stage 1 (empty-vector): make a default-constructed vector report
-//            size() == 0, capacity() >= size() and empty() == true.
-//            START HERE: fix size(), capacity() and empty() below.
+//   Stage 1 (empty-vector): a default-constructed vector reports size() == 0,
+//            capacity() >= size() and empty() == true.
 //   Stage 2 (push-back):    raw storage + push_back(const T&) + operator[] +
 //            a destructor that destroys the elements and frees the storage.
 //
 // Later stages (growth, copy/move, emplace_back, exception safety, iterators,
 // insert/erase) need members that are not declared here yet. When a stage
-// needs one, `./cppatlas test` will say exactly which one to add.
+// needs one, the grader will say exactly which one to add.
 //
 // Rules of the challenge:
 //   - Do not include <vector> or wrap std::vector / std::deque / ...
@@ -37,15 +47,18 @@ public:
     vector() noexcept = default;
 
     std::size_t size() const noexcept {
-        return static_cast<std::size_t>(-1);  // TODO(stage 1): how many elements are stored?
+        // return size_;  // STAGE 1: uncomment this line
+        return static_cast<std::size_t>(-1);  // placeholder: how many elements are stored?
     }
 
     std::size_t capacity() const noexcept {
-        return 0;  // TODO(stage 1): how many elements fit before we must reallocate?
+        // return capacity_;  // STAGE 1: uncomment this line
+        return 0;  // placeholder: how many elements fit before we must reallocate?
     }
 
     bool empty() const noexcept {
-        return false;  // TODO(stage 1)
+        // return size_ == 0;  // STAGE 1: uncomment this line
+        return false;  // placeholder
     }
 
     // ---------------------------------------------------------------- stage 2
@@ -80,10 +93,11 @@ public:
     vector& operator=(const vector&) = delete;
 
 private:
-    // Suggested representation (uncomment when you need it):
+    // std::size_t size_ = 0;       // STAGE 1: uncomment this line (constructed elements)
+    // std::size_t capacity_ = 0;   // STAGE 1: uncomment this line (allocated slots)
+
+    // Stage 2 will also need a pointer to the buffer. Add it when you need it:
     // T* data_ = nullptr;          // first element (raw storage from an allocator)
-    // std::size_t size_ = 0;       // constructed elements: data_[0] .. data_[size_ - 1]
-    // std::size_t capacity_ = 0;   // allocated slots
 };
 
 }  // namespace my

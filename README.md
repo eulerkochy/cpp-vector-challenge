@@ -5,7 +5,8 @@ geometric growth, copy/move, `emplace_back`, the strong exception guarantee,
 contiguous iterators and `insert`/`erase`. You write `my::vector<T>` in one
 header; a doctest suite tells you what to fix next.
 
-Guide and stage pages: <https://cppatlas.com/build/vector>
+Guide and stage pages: <https://cppatlas.com/build/vector>. Grading is remote by
+default (`./cppatlas submit`); running the tests locally is optional.
 
 You edit exactly one file: **`include/my/vector.hpp`**. Everything else is the
 harness. If you get stuck, the reference solution is public at
@@ -30,51 +31,49 @@ messages are meant to get you there.
 
 ## Quick start
 
-1. Click **Use this template** on <https://github.com/eulerkochy/cpp-vector-challenge>
+1. **Use this template.** Click **Use this template** on
+   <https://github.com/eulerkochy/cpp-vector-challenge>
    (or go to
    <https://github.com/new?template_name=cpp-vector-challenge&template_owner=eulerkochy>)
    to create your own copy.
-2. Clone it, or open it in a Codespace.
-3. Run `./cppatlas test`. Stage 1 fails on purpose; read
-   <https://cppatlas.com/build/vector/empty-vector> and start editing
-   `include/my/vector.hpp`.
-4. `git push` to get graded: GitHub Actions runs the same tests on your repository.
+2. **Clone it** (or open it in a Codespace).
+3. **Run `./cppatlas submit`.** For stage 1, first uncomment the marked lines in
+   `include/my/vector.hpp` (see
+   <https://cppatlas.com/build/vector/empty-vector>). The command sends your
+   header to the grader at <https://run.cppatlas.com>, prints a live
+   `[tester::#N]` log, and when the stage passes advances `.cppatlas.json` to
+   the next stage. Commit that file.
+4. **Install the GitHub App.** Go to
+   <https://github.com/apps/c-atlas-grader/installations/new>. Choosing "All
+   repositories" is safe: repositories without a `.cppatlas.json` are ignored.
+   Or pick just this repository.
+5. **Push.** From then on, `git push` also grades your commit and posts a check
+   named `cppatlas / vector` on it.
 
-### Option A: dev container / GitHub Codespaces (recommended)
-
-Open the repository in a Codespace, or in VS Code run "Dev Containers: Reopen
-in Container". You get GCC 16.2, Clang 21, CMake, Ninja, ccache, gdb and lldb,
-with the sanitizers working. The first build is done for you.
-
-```
-./cppatlas test
-```
-
-Default compiler in the container is GCC 16.2 (`CXX=g++`). To use Clang for a
-run: `CXX=clang++-21 ./cppatlas test`. Each compiler keeps its own build
-directory, so switching is cheap. Both compilers use GCC 16.2's libstdc++, so
-they see the same C++23 standard library.
-
-### Option B: your own machine
-
-You need bash, CMake, Ninja and a C++23 compiler (see [Requirements](#requirements)).
+`./cppatlas submit` needs only `curl` and `python3` or `jq`. No local compiler
+is required. The grader uses GCC 16.2 (default) or Clang 21 in C++23 mode.
 
 ```
-git clone https://github.com/<you>/<your-copy-of-the-template>
-cd <your-copy-of-the-template>
-./cppatlas test
+./cppatlas submit                      # stages 1..current; advances on pass
+./cppatlas submit --stage 3            # stages 1..3, never advances
+./cppatlas submit --compiler clang     # gcc (default) or clang
+./cppatlas submit --sanitize           # AddressSanitizer + UndefinedBehaviorSanitizer
+./cppatlas help                        # all commands
 ```
 
-## The edit-test loop
+Prefer a manual run on GitHub instead? The repository also has a workflow:
+Actions tab, then "tests", then "Run workflow". It does not run on push.
+
+## The edit-submit loop
 
 1. Read the stage page (start with stage 1).
 2. Edit `include/my/vector.hpp`.
-3. Run `./cppatlas test`.
+3. Run `./cppatlas submit`.
 
-`./cppatlas test` runs stages 1 through your **current stage** and **stops at
-the first failing stage**, so earlier stages act as regression tests while you
-work on later ones. The starter header compiles but is deliberately wrong;
-stage 1 fails until you fix `size()`, `capacity()` and `empty()`.
+`./cppatlas submit` grades stages 1 through your **current stage** and **stops
+at the first failing stage**, so earlier stages act as regression tests while
+you work on later ones. The starter header compiles but is deliberately
+incomplete; stage 1 fails until you uncomment its lines.
 
 ### Your progress: `.cppatlas.json`
 
@@ -84,35 +83,21 @@ The file `.cppatlas.json` at the repository root records which stage you are on:
 {"challenge":"vector","stage":1}
 ```
 
-When stages 1..*stage* all pass, `./cppatlas test` advances the file and tells you:
+When stages 1..*stage* all pass, `./cppatlas submit` advances the file and tells you
+which stage is next and where its page is.
 
-```
-stage 3 passed ✓ — advanced to stage 4: Copy and move. Read https://cppatlas.com/build/vector/copy-and-move
-```
-
-**Commit the file after it advances** (`git add .cppatlas.json`). `git push`
-then grades the same stages: the GitHub workflow reads the stage from the file
-and runs stages 1..*stage*, so a push is green when your current stage passes.
-Explicit forms (`./cppatlas test 3`, `--only 3`) never change the file, and
-`--no-advance` runs the current stage without advancing. The file must exist and
-`stage` must be 1 to 8, otherwise `./cppatlas` and CI report a clear error. Once
-stage 8 passes you are done: `All 8 stages pass.`
-
-```
-./cppatlas test              # stages 1..current stage; advances when they pass
-./cppatlas test --no-advance # same, but leave .cppatlas.json alone
-./cppatlas test 3            # stages 1..3 (never advances)
-./cppatlas test --only 3     # just stage 3 (never advances)
-./cppatlas test -v           # full compiler / test output
-./cppatlas stages            # list stages and spec links
-./cppatlas clean             # delete build/
-```
+**Commit the file after it advances** (`git add .cppatlas.json`). The GitHub App
+reads the stage from that file at the pushed commit and grades stages
+1..*stage*, so a push is green when your current stage passes. Explicit forms
+(`--stage 3`, `./cppatlas test 3`, `--only 3`) never change the file. The file
+must exist and `stage` must be 1 to 8, otherwise `./cppatlas` reports a clear
+error. Once stage 8 passes you are done.
 
 ### Reading a failure
 
-There are two kinds, and the output tells you which.
+There are two kinds, and the log tells you which.
 
-**"does not compile" with a bullet list.** Each stage's tests check, before
+**A compile failure with a bullet list.** Each stage's tests check, before
 compiling the test bodies, that your class has the members the stage needs. A
 missing member is reported as one bullet instead of a wall of template errors:
 
@@ -140,29 +125,72 @@ stage_01.cpp:69: ERROR: CHECK( v.size() == 0 ) is NOT correct!
 The tests also count constructions, copies, moves and destructions of
 instrumented element types, so a leak, a double destroy or an unnecessary copy
 is reported as a failure with the counts. A crash prints the stage and test
-case and suggests the sanitizer run. A stage that runs longer than 30 s is
-killed and the test case it was in is named (usually an infinite loop; change
-the limit with `CPPATLAS_TIMEOUT=60`).
-
-The last line always links to the spec page for the failing stage.
+case and suggests the sanitizer run. The last line links to the spec page for
+the failing stage.
 
 ### Sanitizers
 
 ```
-./cppatlas test --preset asan-ubsan
-./cppatlas test --only 4 --preset asan-ubsan
+./cppatlas submit --sanitize
 ```
 
-The `asan-ubsan` preset builds with AddressSanitizer and UndefinedBehaviorSanitizer
-(and LeakSanitizer on Linux), halting at the first error. Use it from stage 2
-onward and whenever a stage crashes: a double free, a leak, an out-of-bounds
-access, a read of a destroyed element or a misaligned object becomes an
-immediate, precisely located report instead of a mystery crash three tests
-later. It is slower to build, so use the default `debug` preset for the quick loop.
+`--sanitize` grades with AddressSanitizer and UndefinedBehaviorSanitizer. Use
+it from stage 2 onward and whenever a stage crashes: a double free, a leak, an
+out-of-bounds access, a read of a destroyed element or a misaligned object
+becomes an immediate, precisely located report instead of a mystery crash three
+tests later. It is slower, so use the plain run for the quick loop.
 
-## Plain CMake and CTest
+## Optional: run the tests locally
 
-`./cppatlas` is a thin wrapper. The same thing by hand:
+Remote grading is the default. Running the suite on your own machine is a
+faster loop and lets you use a debugger, but it needs a toolchain
+(see [Requirements](#requirements)). The commands below are only for local
+testing.
+
+```
+./cppatlas doctor            # checks cmake, ninja, compilers, C++23 and sanitizer probes
+./cppatlas test              # stages 1..current stage; advances when they pass
+./cppatlas test --no-advance # same, but leave .cppatlas.json alone
+./cppatlas test 3            # stages 1..3 (never advances)
+./cppatlas test --only 3     # just stage 3 (never advances)
+./cppatlas test -v           # full compiler / test output
+./cppatlas test --preset asan-ubsan
+./cppatlas stages            # list stages and spec links
+./cppatlas clean             # delete build/
+```
+
+`./cppatlas doctor` compares your tools with the grader's versions and prints
+warnings. It never fails hard, and you do not need it for `submit`. A stage
+that runs longer than 30 s locally is killed and the test case it was in is
+named (usually an infinite loop; change the limit with `CPPATLAS_TIMEOUT=60`).
+
+### Option A: dev container / GitHub Codespaces (recommended)
+
+Open the repository in a Codespace, or in VS Code run "Dev Containers: Reopen
+in Container". You get GCC 16.2, Clang 21, CMake, Ninja, ccache, gdb and lldb,
+with the sanitizers working. The first build is done for you.
+
+```
+./cppatlas test
+```
+
+Default compiler in the container is GCC 16.2 (`CXX=g++`). To use Clang for a
+run: `CXX=clang++-21 ./cppatlas test`. Each compiler keeps its own build
+directory, so switching is cheap. Both compilers use GCC 16.2's libstdc++, so
+they see the same C++23 standard library.
+
+### Option B: your own machine
+
+You need bash, CMake, Ninja and a C++23 compiler (see [Requirements](#requirements)).
+
+```
+./cppatlas doctor
+./cppatlas test
+```
+
+## Plain CMake and CTest (local)
+
+`./cppatlas test` is a thin wrapper. The same thing by hand:
 
 ```
 cmake --preset debug                  # or: asan-ubsan
@@ -184,13 +212,15 @@ The same suite compiles and passes against `std::vector`:
 CPPATLAS_CMAKE_ARGS="-DUSE_STD=ON" ./cppatlas test
 ```
 
-(`--preset asan-ubsan` works too.) So every assertion checks behavior the
+(`--preset asan-ubsan` works too. This runs locally.) So every assertion checks behavior the
 standard guarantees. If a test fails on your vector, your vector is wrong, not
 merely different from libstdc++. Implementation choices such as the growth
 factor or the exact capacity after `reserve` are deliberately not asserted.
 `CPPATLAS_CMAKE_ARGS` is meant for this kind of check; leave it unset normally.
 
 ## Requirements
+
+Only for local testing (`./cppatlas test`). `./cppatlas submit` needs just `curl` and `python3` or `jq`.
 
 - bash (the `./cppatlas` script is bash 3.2 compatible)
 - CMake 3.25 or newer (`CMakeLists.txt` requires 3.23; `CMakePresets.json` uses preset schema version 6, which needs 3.25)
@@ -205,7 +235,7 @@ the dev container (Debian 13), and Homebrew GCC 16.2 and LLVM 21 on macOS.
 
 | Tier | Environment | Status |
 |------|-------------|--------|
-| 1 | Dev container / Codespaces (Debian 13, GCC 16.2 default + Clang 21, ASan, UBSan, LSan) | Fully supported. This is what CI runs. |
+| 1 | Dev container / Codespaces (Debian 13, GCC 16.2 default + Clang 21, ASan, UBSan, LSan) | Fully supported. Matches the grader's toolchain. |
 | 2 | macOS with Homebrew GCC 16.2 or LLVM 21 | Supported. No LeakSanitizer on macOS (the harness's live-object counter still catches leaked elements). |
 | 3 | Windows with MSVC | Best effort. Needs a Visual Studio release whose MSVC accepts `/std:c++latest` (C++23 preview) for this code; no UBSan; use the `debug` preset only. The dev container or WSL is recommended. |
 
@@ -234,17 +264,21 @@ CPPATLAS_TRACE=trace.jsonl ./build/debug/stage_03
 Handy for seeing exactly which element was destroyed twice. Off by default;
 `*.jsonl` is git-ignored.
 
-## Tests on every push
+## Grading on push, and the manual workflow
 
-`.github/workflows/test.yml` reads your stage from `.cppatlas.json` and runs
-stages 1..*stage* with `./cppatlas test <stage>` on GitHub Actions, inside the
-dev container image, for GCC 16.2 and Clang 21, with the `debug` and
-`asan-ubsan` presets, and writes a progress summary on the run page. The run is
-green when your current stage (and every earlier one) passes under both
-compilers and the sanitizers, and red at the first failing stage. Remember to
-commit `.cppatlas.json` after it advances, otherwise CI keeps grading the old
-stage. Because CI builds the same image as the dev container, a failure there
-reproduces locally in the container.
+Installing the GitHub App (step 4 of the quick start) grades every `git push`
+on repositories that have a `.cppatlas.json`. The app reads `.cppatlas.json` and
+`include/my/vector.hpp` at the pushed commit, grades stages 1..*stage*, and
+posts a check run named `cppatlas / vector` on the commit. Remember to commit
+`.cppatlas.json` after it advances, otherwise the push is graded on the old
+stage.
+
+`.github/workflows/test.yml` is a manual fallback for people who do not install
+the App. It runs only when you start it (Actions tab, then "tests", then "Run
+workflow"), reads your stage from `.cppatlas.json`, and runs stages 1..*stage*
+with `./cppatlas test <stage>` inside the dev container image, for GCC 16.2 and
+Clang 21, with the `debug` and `asan-ubsan` presets. It writes a progress
+summary on the run page.
 
 ## Troubleshooting
 

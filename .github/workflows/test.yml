@@ -1,22 +1,25 @@
-# Runs your stage tests on every push: edit include/my/vector.hpp, push, read the result.
+# Manual fallback grader. Start it from the Actions tab: tests -> Run workflow.
 #
-# `.cppatlas.json` says which stage you are on. CI runs stages 1..<that stage>
-# with `./cppatlas test <stage>`, so a push is green when your current stage
-# (and every earlier one) passes under GCC 16.2 and Clang 21 (C++23), with and
-# without AddressSanitizer + UndefinedBehaviorSanitizer. `./cppatlas test`
-# advances `.cppatlas.json` locally when a stage passes: commit that file and
-# the next push is graded on the next stage.
+# This workflow does not run on push or pull_request. The default ways to grade
+# are `./cppatlas submit` and the c-atlas-grader GitHub App, which checks every
+# push and posts a `cppatlas / vector` check on the commit. Running this too
+# would only add a second, redundant check. Use it if you do not want to
+# install the App.
+#
+# `.cppatlas.json` says which stage you are on. The run grades stages
+# 1..<that stage> with `./cppatlas test <stage>` under GCC 16.2 and Clang 21
+# (C++23), with and without AddressSanitizer + UndefinedBehaviorSanitizer.
+# `./cppatlas submit` advances `.cppatlas.json` when a stage passes: commit
+# and push that file before starting the run so it grades the next stage.
 name: tests
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A new push cancels the still-running older run for the same ref.
+# Starting a new run cancels the still-running older run for the same ref.
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -108,7 +111,7 @@ jobs:
             elif grep -q '^All [0-9]* stages' cppatlas-output.txt 2>/dev/null; then
               echo "**$(grep '^All [0-9]* stages' cppatlas-output.txt)**"
             elif [ -s cppatlas-output.txt ]; then
-              echo "**Stages 1..$stage pass.** Run ./cppatlas test locally to advance."
+              echo "**Stages 1..$stage pass.** Run ./cppatlas submit to advance."
             else
               echo "Stage $stage did not run; see the log."
             fi

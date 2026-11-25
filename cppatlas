@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
-# cppatlas - run the "Build your own std::vector" stages.
+# cppatlas - the "Build your own std::vector" command line.
 #
-#   ./cppatlas test                 run stages 1..<your current stage> (from .cppatlas.json);
-#                                   when they all pass, advance to the next stage
-#   ./cppatlas test 3               run stages 1..3 (never advances)
-#   ./cppatlas test --only 3        run only stage 3 (never advances)
-#   ./cppatlas test --no-advance    run the current stage but do not touch .cppatlas.json
-#   ./cppatlas test --preset asan-ubsan   build with AddressSanitizer + UBSan (default: debug)
-#   ./cppatlas test -v              show full compiler / test output
-#   ./cppatlas stages               list the stages
-#   ./cppatlas clean                remove build/
-#
-# Environment:
-#   CXX=g++-16 ./cppatlas test      pick the compiler (each compiler gets its own build dir)
-#   CPPATLAS_CMAKE_ARGS="-DUSE_STD=ON"   extra configure arguments (testers only)
-#   CPPATLAS_BUILD_DIR=dir          override the build directory
-#   CPPATLAS_TIMEOUT=30             seconds before a hanging stage is killed
-#   NO_COLOR=1                      plain output
-#
-# Portable to bash 3.2 (macOS) and Linux.
+# Run ./cppatlas help (or ./cppatlas with no arguments) for usage.
+# Portable to bash 3.2 (macOS) and Linux. Needs curl and python3 or jq for
+# `submit`; cmake, ninja and a C++23 compiler only for the optional local `test`.
 set -u
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -57,16 +42,59 @@ two_digits() { if [ "$1" -lt 10 ]; then echo "0$1"; else echo "$1"; fi; }
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     C_OK=$'\033[32m'; C_BAD=$'\033[31m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_OFF=$'\033[0m'
+    C_TAG=$'\033[33m'
     USE_COLOR=1
 else
     C_OK=""; C_BAD=""; C_DIM=""; C_BOLD=""; C_OFF=""
+    C_TAG=""
     USE_COLOR=0
 fi
 
 die() { echo "cppatlas: $*" >&2; exit 2; }
 
 usage() {
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<EOF
+cppatlas - the "Build your own std::vector" challenge.
+
+Get graded (the default; needs only curl and python3 or jq, no compiler):
+  ./cppatlas submit               grade stages 1..<your stage> (from .cppatlas.json) on
+                                  the cppatlas grader (GCC 16.2, C++23); when they all
+                                  pass, advance .cppatlas.json to the next stage
+  ./cppatlas submit --stage 3     grade stages 1..3 (never advances)
+  ./cppatlas submit --only 3      grade only stage 3 (never advances)
+  ./cppatlas submit --compiler clang   grade with Clang 21 instead of GCC 16.2
+  ./cppatlas submit --sanitize    build with AddressSanitizer + UBSan
+  ./cppatlas submit --no-advance  grade your stage but do not touch .cppatlas.json
+  ./cppatlas submit -v            show every test case and the full compiler output
+
+Test locally (optional, faster; needs cmake >= 3.25, ninja and a C++23 compiler):
+  ./cppatlas test                 run stages 1..<your stage> on this machine; when they
+                                  all pass, advance to the next stage
+  ./cppatlas test 3               run stages 1..3 (never advances)
+  ./cppatlas test --only 3        run only stage 3 (never advances)
+  ./cppatlas test --no-advance    run your stage but do not touch .cppatlas.json
+  ./cppatlas test --preset asan-ubsan   AddressSanitizer + UBSan (same as --sanitize)
+  ./cppatlas test -v              show full compiler / test output
+
+Other commands:
+  ./cppatlas doctor               check this machine for local testing
+  ./cppatlas stages               list the stages
+  ./cppatlas clean                remove build/
+  ./cppatlas help                 this text
+
+Environment:
+  CPPATLAS_API=url                grader address (default https://run.cppatlas.com)
+  CPPATLAS_SUBMIT_TIMEOUT=300     seconds submit waits for a result before giving up
+  CPPATLAS_JSON=jq|python3        JSON tool submit uses (default: jq if found, else python3)
+  CXX=g++-16 ./cppatlas test      local compiler (each compiler gets its own build dir)
+  CPPATLAS_CMAKE_ARGS="-DUSE_STD=ON"   extra local configure arguments (testers only)
+  CPPATLAS_BUILD_DIR=dir          override the local build directory
+  CPPATLAS_TIMEOUT=30             seconds before a hanging local stage is killed
+  NO_COLOR=1                      plain output
+
+Exit status: 0 every requested stage passed, 1 your code failed a stage,
+2 usage, setup, network or grader problem, 130 interrupted.
+EOF
 }
 
 # ----------------------------------------------------------------- arguments
@@ -78,12 +106,18 @@ UPTO=""
 ONLY=""
 VERBOSE=0
 ADVANCE=1
+COMPILER=""
 while [ $# -gt 0 ]; do
     case "$1" in
     --preset) [ $# -ge 2 ] || die "--preset needs a value (debug or asan-ubsan)"; PRESET="$2"; shift 2 ;;
     --preset=*) PRESET="${1#--preset=}"; shift ;;
-    --only) [ $# -ge 2 ] || die "--only needs a stage number"; ONLY="$2"; shift 2 ;;
-    --only=*) ONLY="${1#--only=}"; shift ;;
+    --sanitize) PRESET="asan-ubsan"; shift ;;
+    --only) [ $# -ge 2 ] && [ -n "$2" ] || die "--only needs a stage number"; ONLY="$2"; shift 2 ;;
+    --only=*) ONLY="${1#--only=}"; [ -n "$ONLY" ] || die "--only needs a stage number"; shift ;;
+    --stage) [ $# -ge 2 ] && [ -n "$2" ] || die "--stage needs a stage number"; UPTO="$2"; shift 2 ;;
+    --stage=*) UPTO="${1#--stage=}"; [ -n "$UPTO" ] || die "--stage needs a stage number"; shift ;;
+    --compiler) [ $# -ge 2 ] || die "--compiler needs a value (gcc or clang)"; COMPILER="$2"; shift 2 ;;
+    --compiler=*) COMPILER="${1#--compiler=}"; shift ;;
     --no-advance) ADVANCE=0; shift ;;
     -v | --verbose) VERBOSE=1; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -92,11 +126,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "$PRESET" in debug | asan-ubsan) ;; *) die "unknown preset '$PRESET' (debug or asan-ubsan)" ;; esac
+case "$COMPILER" in
+"" | gcc | clang) ;;
+*) die "unknown compiler '$COMPILER' (the grader has gcc (GCC 16.2) and clang (Clang 21))" ;;
+esac
 for n in "$UPTO" "$ONLY"; do
+    case "$n" in *[!0-9]* | ????*) die "stage must be a number between 1 and $MAX_STAGE (got '$n')" ;; esac
     if [ -n "$n" ] && { [ "$n" -lt 1 ] || [ "$n" -gt $MAX_STAGE ]; }; then
         die "stage must be between 1 and $MAX_STAGE"
     fi
 done
+# "08" -> "8": a leading zero would make shell arithmetic read it as octal.
+[ -z "$UPTO" ] || UPTO=$((10#$UPTO))
+[ -z "$ONLY" ] || ONLY=$((10#$ONLY))
+[ -z "$UPTO" ] || [ -z "$ONLY" ] || die "use either a stage number (--stage N) or --only N, not both"
 
 # ------------------------------------------------------------- progress file
 PROGRESS_FILE="$ROOT/.cppatlas.json"
@@ -106,18 +149,30 @@ read_progress() {
     [ -f "$PROGRESS_FILE" ] || die ".cppatlas.json not found in $ROOT.
   It records which stage you are on. Create it with:
     echo '{\"challenge\":\"vector\",\"stage\":1}' > .cppatlas.json
-  or run an explicit stage: ./cppatlas test 3"
+  or grade an explicit stage: ./cppatlas submit --stage 3 (or locally: ./cppatlas test 3)"
     local st
     st="$(tr -d ' \t\r\n' <"$PROGRESS_FILE" | sed -n 's/.*"stage":\([0-9][0-9]*\)[,}].*/\1/p')"
     [ -n "$st" ] || die ".cppatlas.json has no numeric \"stage\" field (expected {\"challenge\":\"vector\",\"stage\":1})"
+    case "$st" in ????*) die ".cppatlas.json: stage must be between 1 and $MAX_STAGE (found $st)" ;; esac
+    st=$((10#$st))
     if [ "$st" -lt 1 ] || [ "$st" -gt $MAX_STAGE ]; then
         die ".cppatlas.json: stage must be between 1 and $MAX_STAGE (found $st)"
     fi
     CURRENT_STAGE="$st"
 }
 
+# write_progress N: replace .cppatlas.json via a temporary file and mv, with
+# Ctrl-C held off, so an interrupt can never leave it empty or half written.
+INT_TRAP=-
+PROGRESS_WRITTEN=0
 write_progress() {
-    printf '{"challenge":"vector","stage":%s}\n' "$1" >"$PROGRESS_FILE"
+    local tmp="$PROGRESS_FILE.tmp.$$" ok=1
+    trap '' INT
+    { printf '{"challenge":"vector","stage":%s}\n' "$1" >"$tmp" && mv -f "$tmp" "$PROGRESS_FILE"; } 2>/dev/null || ok=0
+    [ $ok -eq 1 ] && PROGRESS_WRITTEN=1
+    rm -f "$tmp"
+    trap "$INT_TRAP" INT
+    [ $ok -eq 1 ] || die "could not update $PROGRESS_FILE (is it writable?)"
 }
 
 # ----------------------------------------------------------------- build dir
@@ -314,8 +369,11 @@ run_stage() {
 }
 
 cmd_test() {
-    command -v cmake >/dev/null 2>&1 || die "cmake not found"
-    command -v ninja >/dev/null 2>&1 || die "ninja not found"
+    local need="local testing needs cmake, ninja and a C++23 compiler (./cppatlas doctor checks them);
+  ./cppatlas submit grades on the cppatlas grader without any of them"
+    command -v cmake >/dev/null 2>&1 || die "cmake not found: $need"
+    command -v ninja >/dev/null 2>&1 || die "ninja not found: $need"
+    [ -z "$COMPILER" ] || die "--compiler is for ./cppatlas submit; pick the local compiler with CXX=... ./cppatlas test"
     ensure_configured
     load_test_env
 
@@ -368,10 +426,19 @@ cmd_test() {
         n=$((n + 1))
     done
     [ $ran -gt 0 ] || die "no stage tests found in $ROOT/tests"
-    if [ "$FROM_PROGRESS" -eq 1 ]; then
+    report_pass "$FROM_PROGRESS" "$last" "$ran"
+    exit 0
+}
+
+# report_pass FROM_PROGRESS LAST RAN - the closing message after stages 1..LAST
+# (or --only LAST) passed. Shared by `test` and `submit`. When the stage came
+# from .cppatlas.json (FROM_PROGRESS=1) and advancing is on, this advances it.
+report_pass() {
+    local from="$1" last="$2" ran="$3" next
+    if [ "$from" -eq 1 ]; then
         echo
-        if [ $last -lt $MAX_STAGE ]; then
-            local next=$((last + 1))
+        if [ "$last" -lt $MAX_STAGE ]; then
+            next=$((last + 1))
             if [ $ADVANCE -eq 1 ]; then
                 write_progress "$next"
                 echo "${C_OK}stage $last passed ✓${C_OFF} — advanced to stage $next: $(title_of $next). Read $SPEC_BASE/$(slug_of $next)"
@@ -383,21 +450,1106 @@ cmd_test() {
             echo "${C_BOLD}All $MAX_STAGE stages pass. You built std::vector.${C_OFF}"
         fi
     elif [ -z "$ONLY" ]; then
-        local next=$((last + 1))
+        next=$((last + 1))
         echo
-        if [ $last -lt $MAX_STAGE ]; then
+        if [ "$last" -lt $MAX_STAGE ]; then
             echo "next: stage $next $(slug_of $next) - $SPEC_BASE/$(slug_of $next)"
-        elif [ $ran -eq $MAX_STAGE ]; then
+        elif [ "$ran" -eq $MAX_STAGE ]; then
             echo "${C_BOLD}All $MAX_STAGE stages pass. You built std::vector.${C_OFF}"
         else
             echo "All $ran stages that have tests pass."
         fi
     fi
+}
+
+# ------------------------------------------------------------------- submit
+# ./cppatlas submit: send include/my/vector.hpp to the grader (CPPATLAS_API),
+# wait for the result and print it. JSON is handled by jq or python3; both turn
+# a response into the same line-oriented records ("key<TAB>value"), which the
+# shell then renders. File contents never pass through a shell string.
+
+API="${CPPATLAS_API:-https://run.cppatlas.com}"
+API="${API%/}"
+UA="cppatlas-cli/1 (vector)"
+TAB=$'\t'
+SUBMIT_FILE_REL="include/my/vector.hpp"
+MAX_FILE_BYTES=262144
+TMPD=""
+RUN_ID=""
+
+# jq program: one JSON response -> records. Keep in sync with PY_FLATTEN.
+# shellcheck disable=SC2016 # $v etc. are jq variables
+JQ_FLATTEN='
+def clean: tostring
+  | gsub("\u001b\\[[0-9;?]*[ -/]*[@-~]|\u001b\\][^\u0007\u001b]*(\u0007|\u001b\\\\)?|\u001b[@-Z\\\\-_]"; "")
+  | gsub("[\u0000-\u0008\u000b-\u001f\u007f-\u009f]"; "")
+  | gsub("[‪-‮⁦-⁩‎‏؜]"; "�");
+def kv($k; $v): if $v == null then empty
+  elif ($v | type) == "string" then "\($k)\t\($v | clean | gsub("\n"; " "))"
+  else "\($k)\t\($v | tostring | clean | gsub("\n"; " "))" end;
+def ml($k; $v): if $v == null then empty
+  else ($v | tostring | clean | sub("\n+$"; "") | select(length > 0) | split("\n")[] | "\($k)\t\(.)") end;
+def flag($k; $v): if $v == true then "\($k)\ttrue" else empty end;
+if type != "object" then error("not an object") else . end
+| kv("id"; .id), kv("status"; .status), kv("qpos"; .queue_position),
+  (.error | objects | kv("ecode"; .code), kv("efield"; .field), kv("emsg"; .message)),
+  (.result | objects |
+    kv("r_status"; .status), kv("passed"; .passed), kv("compiler"; .compiler), kv("preset"; .preset),
+    (.timings | objects | kv("t_total"; .total_ms), kv("t_setup"; .setup_ms), kv("t_build"; .build_ms), kv("t_test"; .test_ms)),
+    (.error | objects | kv("r_ecode"; .code), kv("r_emsg"; .message)),
+    (.stages | arrays | .[] | objects |
+      kv("S"; .stage), kv("s_status"; .status), kv("phase"; .phase), kv("signal"; .signal),
+      kv("exit_code"; .exit_code), kv("running"; .running_test), ml("hint"; .hint),
+      kv("build_ms"; .build_ms), kv("run_ms"; .run_ms),
+      (.counts | objects | kv("n_total"; .total), kv("n_passed"; .passed), kv("n_failed"; .failed)),
+      (.compile | objects | ml("fe"; .first_error), flag("ctrunc"; .truncated), kv("ecount"; .error_count),
+        (.preflight | arrays | .[] | kv("pre"; .)), ml("cout"; .output)),
+      (.tests | arrays | .[] | objects |
+        "T\t\(.status // "" | clean | gsub("[\n\t]"; " "))\t\(.name // "" | clean | gsub("\n"; " "))",
+        (.messages | arrays | .[] | ml("m"; .))),
+      ml("out"; .output), flag("otrunc"; .output_truncated)))
+'
+
+# python3 program: same records as JQ_FLATTEN. argv[1] = response file.
+PY_FLATTEN='
+import json, re, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+ANSI = re.compile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)?|\x1b[@-Z\\\\-_]")
+CTRL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+BIDI = re.compile("[‪-‮⁦-⁩‎‏؜]")
+out = []
+def tostr(v):
+    if isinstance(v, bool): return "true" if v else "false"
+    if isinstance(v, str): return v
+    if isinstance(v, (int, float)): return json.dumps(v)
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+def clean(v):
+    return BIDI.sub("�", CTRL.sub("", ANSI.sub("", tostr(v))))
+def kv(k, v):
+    if v is not None: out.append(k + "\t" + clean(v).replace("\n", " "))
+def ml(k, v):
+    if v is None: return
+    s = re.sub("\n+$", "", clean(v))
+    if s: out.extend(k + "\t" + line for line in s.split("\n"))
+def flag(k, v):
+    if v is True: out.append(k + "\ttrue")
+def obj(v): return v if isinstance(v, dict) else None
+def arr(v): return v if isinstance(v, list) else []
+def main():
+    with open(sys.argv[1], "rb") as f:
+        d = json.loads(f.read().decode("utf-8", "replace"))
+    if not isinstance(d, dict): raise ValueError("not an object")
+    kv("id", d.get("id")); kv("status", d.get("status")); kv("qpos", d.get("queue_position"))
+    e = obj(d.get("error"))
+    if e is not None: kv("ecode", e.get("code")); kv("efield", e.get("field")); kv("emsg", e.get("message"))
+    r = obj(d.get("result"))
+    if r is not None:
+        kv("r_status", r.get("status")); kv("passed", r.get("passed"))
+        kv("compiler", r.get("compiler")); kv("preset", r.get("preset"))
+        t = obj(r.get("timings"))
+        if t is not None:
+            kv("t_total", t.get("total_ms")); kv("t_setup", t.get("setup_ms"))
+            kv("t_build", t.get("build_ms")); kv("t_test", t.get("test_ms"))
+        re_ = obj(r.get("error"))
+        if re_ is not None: kv("r_ecode", re_.get("code")); kv("r_emsg", re_.get("message"))
+        for s in arr(r.get("stages")):
+            if not isinstance(s, dict): continue
+            kv("S", s.get("stage")); kv("s_status", s.get("status")); kv("phase", s.get("phase"))
+            kv("signal", s.get("signal")); kv("exit_code", s.get("exit_code"))
+            kv("running", s.get("running_test")); ml("hint", s.get("hint"))
+            kv("build_ms", s.get("build_ms")); kv("run_ms", s.get("run_ms"))
+            c = obj(s.get("counts"))
+            if c is not None: kv("n_total", c.get("total")); kv("n_passed", c.get("passed")); kv("n_failed", c.get("failed"))
+            c = obj(s.get("compile"))
+            if c is not None:
+                ml("fe", c.get("first_error")); flag("ctrunc", c.get("truncated")); kv("ecount", c.get("error_count"))
+                for p in arr(c.get("preflight")): kv("pre", p)
+                ml("cout", c.get("output"))
+            for tc in arr(s.get("tests")):
+                if not isinstance(tc, dict): continue
+                st = tc.get("status"); nm = tc.get("name")
+                st = "" if st is None else clean(st); nm = "" if nm is None else clean(nm)
+                out.append("T\t" + st.replace("\n", " ").replace("\t", " ") + "\t" + nm.replace("\n", " "))
+                for m in arr(tc.get("messages")): ml("m", m)
+            ml("out", s.get("output")); flag("otrunc", s.get("output_truncated"))
+    sys.stdout.buffer.write("".join(x + "\n" for x in out).encode("utf-8", "replace"))
+try:
+    main()
+except Exception:
+    sys.exit(3)
+'
+
+# python3 program: build the POST body. argv: file stage compiler preset only(0|1)
+PY_BODY='
+import json, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+try:
+    with open(sys.argv[1], "rb") as f:
+        src = f.read().decode("utf-8")
+except UnicodeDecodeError:
+    sys.exit(4)
+except Exception:
+    sys.exit(3)
+body = {"challenge": "vector", "stage": int(sys.argv[2]),
+        "files": {"include/my/vector.hpp": src},
+        "options": {"compiler": sys.argv[3], "preset": sys.argv[4]}}
+if sys.argv[5] == "1": body["only"] = True
+sys.stdout.buffer.write(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+'
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# say MSG: a [cppatlas] progress line on stdout.
+say() { echo "${C_DIM}[cppatlas]${C_OFF} $*"; }
+# fail MSG...: [cppatlas] lines on stderr, exit 2 (grader / network / setup problem).
+fail() {
+    local first=1 line
+    for line in "$@"; do
+        if [ $first -eq 1 ]; then
+            echo "${C_BAD}[cppatlas]${C_OFF} $line" >&2
+            first=0
+        else
+            echo "[cppatlas] $line" >&2
+        fi
+    done
+    exit 2
+}
+
+now_ms() {
+    local t
+    t="$(date +%s%N 2>/dev/null)"
+    case "$t" in
+    '' | *[!0-9]*)
+        t="$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000' 2>/dev/null)"
+        case "$t" in '' | *[!0-9]*) t=$(($(date +%s) * 1000)) ;; esac
+        echo "$t"
+        ;;
+    *) echo "${t%??????}" ;;
+    esac
+}
+
+# fmt_s MS -> "3.3s" (or "420ms" under a second)
+fmt_s() {
+    local ms="${1:-0}"
+    case "$ms" in '' | *[!0-9]*) ms=0 ;; esac
+    if [ "$ms" -lt 1000 ]; then echo "${ms}ms"; return; fi
+    echo "$((ms / 1000)).$(((ms % 1000) / 100))s"
+}
+
+pick_json_tool() {
+    local missing=""
+    have curl || missing="curl"
+    case "${CPPATLAS_JSON:-}" in
+    jq)
+        have jq || die "CPPATLAS_JSON=jq but jq is not installed"
+        JSON_TOOL=jq
+        ;;
+    python3)
+        have python3 || die "CPPATLAS_JSON=python3 but python3 is not installed"
+        JSON_TOOL=python3
+        ;;
+    "")
+        if have jq && jq -n --rawfile x /dev/null '1' >/dev/null 2>&1; then
+            JSON_TOOL=jq
+        elif have python3; then
+            JSON_TOOL=python3
+        else
+            JSON_TOOL=""
+            missing="${missing:+$missing and }jq (1.6 or newer) or python3"
+        fi
+        ;;
+    *) die "CPPATLAS_JSON must be jq or python3 (got '$CPPATLAS_JSON')" ;;
+    esac
+    if [ -n "$missing" ]; then
+        die "./cppatlas submit needs curl and either jq or python3; missing: $missing.
+  Install what is missing, e.g. macOS: brew install jq; Debian/Ubuntu: sudo apt install jq curl.
+  Or test locally instead: ./cppatlas test (needs cmake, ninja and a C++23 compiler)"
+    fi
+}
+
+# json_flatten FILE -> records in $TMPD/rec; non-zero if FILE is not a JSON object.
+json_flatten() {
+    [ -s "$1" ] || return 1
+    if [ "$JSON_TOOL" = jq ]; then
+        jq -r "$JQ_FLATTEN" "$1" >"$TMPD/rec" 2>/dev/null
+    else
+        python3 -I -c "$PY_FLATTEN" "$1" >"$TMPD/rec" 2>/dev/null
+    fi
+}
+
+# load_top: J_* from the top-level (non-stage) records of $TMPD/rec.
+load_top() {
+    J_id="" J_status="" J_qpos="" J_ecode="" J_efield="" J_emsg="" J_rstatus="" J_passed=""
+    J_compiler="" J_preset="" J_ttotal="" J_tsetup="" J_tbuild="" J_ttest="" J_recode="" J_remsg=""
+    local line k v
+    while IFS= read -r line; do
+        k="${line%%"$TAB"*}"
+        v="${line#*"$TAB"}"
+        case "$k" in
+        S) break ;;
+        id) J_id="$v" ;;
+        status) J_status="$v" ;;
+        qpos) J_qpos="$v" ;;
+        ecode) J_ecode="$v" ;;
+        efield) J_efield="$v" ;;
+        emsg) J_emsg="$v" ;;
+        r_status) J_rstatus="$v" ;;
+        passed) J_passed="$v" ;;
+        compiler) J_compiler="$v" ;;
+        preset) J_preset="$v" ;;
+        t_total) J_ttotal="$v" ;;
+        t_setup) J_tsetup="$v" ;;
+        t_build) J_tbuild="$v" ;;
+        t_test) J_ttest="$v" ;;
+        r_ecode) J_recode="$v" ;;
+        r_emsg) J_remsg="$v" ;;
+        esac
+    done <"$TMPD/rec"
+}
+
+# http METHOD URL MAXTIME -> HTTP_RC (curl exit status), HTTP_CODE; body in
+# $TMPD/body, headers in $TMPD/hdr. POST sends $TMPD/req.json.
+http() {
+    local rc=0
+    rm -f "$TMPD/body" "$TMPD/hdr" "$TMPD/code"
+    if [ "$1" = POST ]; then
+        curl -s --proto '=http,https' -X POST -o "$TMPD/body" -D "$TMPD/hdr" -w '%{http_code}' \
+            --connect-timeout 10 --max-time "$3" -A "$UA" \
+            -H 'Accept: application/json' -H 'Content-Type: application/json' -H 'Expect:' \
+            --data-binary @"$TMPD/req.json" "$2" >"$TMPD/code" 2>"$TMPD/curlerr" || rc=$?
+    else
+        curl -s --proto '=http,https' -o "$TMPD/body" -D "$TMPD/hdr" -w '%{http_code}' \
+            --connect-timeout 10 --max-time "$3" -A "$UA" \
+            -H 'Accept: application/json' "$2" >"$TMPD/code" 2>"$TMPD/curlerr" || rc=$?
+    fi
+    HTTP_RC=$rc
+    HTTP_CODE=""
+    [ -f "$TMPD/code" ] && read -r HTTP_CODE <"$TMPD/code"
+    case "$HTTP_CODE" in [0-9][0-9][0-9]) ;; *) HTTP_CODE=000 ;; esac
+    return 0
+}
+
+# hdr NAME -> the value of response header NAME (case-insensitive) in the last
+# header block (curl -D also records 1xx blocks), surrounding blanks removed.
+hdr() {
+    [ -f "$TMPD/hdr" ] || return 0
+    tr -d '\r' <"$TMPD/hdr" | awk -v name="$1" '
+        /^HTTP\// { v = ""; next }
+        {
+            i = index($0, ":")
+            if (i > 1 && tolower(substr($0, 1, i - 1)) == tolower(name)) {
+                v = substr($0, i + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+            }
+        }
+        END { print v }'
+}
+
+# curl_problem RC -> a one-line description of a curl failure.
+curl_problem() {
+    case "$1" in
+    1 | 3) echo "CPPATLAS_API ($API) is not a valid http(s) URL" ;;
+    5) echo "could not resolve the proxy (check your https_proxy / http_proxy settings)" ;;
+    6) echo "could not resolve $API_HOST (no internet connection, or a DNS problem)" ;;
+    7) echo "could not connect to $API_HOST (network down, or the connection was refused)" ;;
+    28) echo "timed out talking to $API_HOST" ;;
+    35 | 51 | 53 | 54 | 58 | 59 | 60 | 64 | 66 | 77 | 80 | 82 | 83 | 90 | 91)
+        echo "a TLS/SSL problem talking to $API_HOST (curl error $1; check the system clock and CA certificates)" ;;
+    52) echo "$API_HOST closed the connection without replying" ;;
+    55 | 56 | 92) echo "the connection to $API_HOST broke (curl error $1)" ;;
+    *) echo "curl failed talking to $API_HOST (curl error $1)" ;;
+    esac
+}
+
+# retry_after DEFAULT -> whole seconds from the Retry-After header, 1..60.
+# An HTTP-date or anything else that is not a plain number gives DEFAULT.
+retry_after() {
+    local v
+    v="$(hdr Retry-After)"
+    case "$v" in
+    '' | *[!0-9]*) v="$1" ;;
+    ???*) v=60 ;; # also keeps absurd values out of shell arithmetic
+    esac
+    v=$((10#$v))
+    [ "$v" -lt 1 ] && v=1
+    [ "$v" -gt 60 ] && v=60
+    echo "$v"
+}
+
+# server_error -> "code: message" from the flattened error body ($TMPD/rec loaded).
+server_error() {
+    if [ -n "$J_ecode" ] && [ -n "$J_emsg" ]; then
+        printf '%s: %s\n' "$J_ecode" "$J_emsg"
+    elif [ -n "$J_emsg" ]; then
+        printf '%s\n' "$J_emsg"
+    else
+        printf '%s\n' "${J_ecode:-no details}"
+    fi
+}
+
+# give_up [REASON]: the CPPATLAS_SUBMIT_TIMEOUT deadline is reached (exit 2).
+give_up() {
+    local why="${1:+$1; }"
+    if [ -n "$RUN_ID" ]; then
+        fail "${why}no result within ${SUBMIT_TIMEOUT}s (CPPATLAS_SUBMIT_TIMEOUT); giving up waiting." \
+            "Run $RUN_ID may still finish on the grader. Nothing was changed locally."
+    else
+        fail "${why}could not submit within ${SUBMIT_TIMEOUT}s (CPPATLAS_SUBMIT_TIMEOUT); giving up." \
+            "Nothing was changed locally. $LOCAL_HINT"
+    fi
+}
+
+# nap SECS [REASON [NOTE]]: say NOTE and sleep SECS, unless that would run past
+# the deadline: then give up with REASON instead.
+nap() {
+    local left=$((DEADLINE - SECONDS))
+    [ "$1" -lt "$left" ] || give_up "${2:-}"
+    [ -z "${3:-}" ] || say "$3"
+    sleep "$1"
+}
+
+LOCAL_HINT="You can still test locally: ./cppatlas test (needs cmake, ninja and a C++23 compiler)."
+
+on_submit_int() {
+    trap - INT
+    echo >&2
+    echo "[cppatlas] submission interrupted${RUN_ID:+ (run $RUN_ID)}." >&2
+    if [ "$PROGRESS_WRITTEN" -eq 1 ]; then
+        echo "[cppatlas] The result was already saved in .cppatlas.json." >&2
+    elif [ -n "$RUN_ID" ]; then
+        echo "[cppatlas] A run cannot be cancelled; it may still finish on the grader. Nothing was changed locally." >&2
+    else
+        echo "[cppatlas] Nothing was changed locally." >&2
+    fi
+    exit 130
+}
+
+# check_submit_file: refuse to send a missing, empty, huge or non-text file.
+check_submit_file() {
+    local f="$ROOT/$SUBMIT_FILE_REL" size
+    [ -f "$f" ] || die "$SUBMIT_FILE_REL not found in $ROOT (this is the file you edit and submit)"
+    size="$(wc -c <"$f" | tr -d ' ')"
+    [ "$size" -gt 0 ] || die "$SUBMIT_FILE_REL is empty; nothing to submit"
+    [ "$size" -le $MAX_FILE_BYTES ] || die "$SUBMIT_FILE_REL is $size bytes; the grader accepts at most $MAX_FILE_BYTES bytes (256 KB)"
+    if [ "$(LC_ALL=C tr -d '\000' <"$f" | wc -c | tr -d ' ')" != "$size" ]; then
+        die "$SUBMIT_FILE_REL contains NUL bytes; it must be a UTF-8 text file"
+    fi
+    if [ "$JSON_TOOL" = jq ] && have iconv && ! iconv -f UTF-8 -t UTF-8 "$f" >/dev/null 2>&1; then
+        die "$SUBMIT_FILE_REL is not valid UTF-8 text; save it as UTF-8 and submit again"
+    fi
+}
+
+build_request() { # build_request LAST ONLY(0|1)
+    local f="$ROOT/$SUBMIT_FILE_REL" rc=0
+    if [ "$JSON_TOOL" = jq ]; then
+        jq -n -c --rawfile src "$f" --argjson stage "$1" --arg compiler "$SUB_COMPILER" \
+            --arg preset "$PRESET" --argjson only "$([ "$2" = 1 ] && echo true || echo false)" \
+            '{challenge: "vector", stage: $stage, files: {"include/my/vector.hpp": $src},
+              options: {compiler: $compiler, preset: $preset}} + (if $only then {only: true} else {} end)' \
+            >"$TMPD/req.json" 2>"$TMPD/jqerr" || rc=$?
+    else
+        python3 -I -c "$PY_BODY" "$f" "$1" "$SUB_COMPILER" "$PRESET" "$2" >"$TMPD/req.json" 2>/dev/null || rc=$?
+    fi
+    case $rc in
+    0) ;;
+    4) die "$SUBMIT_FILE_REL is not valid UTF-8 text; save it as UTF-8 and submit again" ;;
+    *) die "could not build the request from $SUBMIT_FILE_REL ($JSON_TOOL failed)" ;;
+    esac
+}
+
+# flatten_body: J_* from $TMPD/body; JSON_OK=1 if it was a JSON object, else
+# JSON_OK=0 and every J_* empty (a proxy's HTML error page, an empty body, ...).
+flatten_body() {
+    JSON_OK=1
+    if ! json_flatten "$TMPD/body"; then
+        JSON_OK=0
+        : >"$TMPD/rec"
+    fi
+    load_top
+}
+
+# post_run: POST /runs with retries for 429 / 502-504; sets RUN_ID and J_* (queued view).
+post_run() {
+    local busy=0 down=0 max_busy=3 max_down=2 wait what left mt loc
+    while :; do
+        left=$((DEADLINE - SECONDS))
+        [ "$left" -gt 0 ] || give_up
+        mt=30
+        [ "$mt" -gt "$left" ] && mt=$left
+        http POST "$API/runs" "$mt"
+        if [ "$HTTP_RC" -ne 0 ]; then
+            fail "could not submit: $(curl_problem "$HTTP_RC")." "$LOCAL_HINT"
+        fi
+        flatten_body
+        case "$HTTP_CODE" in
+        200 | 201 | 202)
+            [ "$JSON_OK" -eq 1 ] || fail "unexpected response (HTTP $HTTP_CODE) from $API_HOST: not the grader's JSON." \
+                "Is CPPATLAS_API ($API) right? $LOCAL_HINT"
+            case "$J_id" in
+            '' | *[!A-Za-z0-9_-]*) fail "unexpected response (HTTP $HTTP_CODE) from $API_HOST: no valid run id." ;;
+            esac
+            RUN_ID="$J_id"
+            return 0
+            ;;
+        429)
+            busy=$((busy + 1))
+            case "$J_ecode" in
+            queue_full) what="the grader is busy ($(server_error))" ;;
+            too_many_runs) what="you already have runs in progress ($(server_error))" ;;
+            rate_limited) what="too many submissions in a short time ($(server_error))" ;;
+            *) what="the grader asked to slow down (HTTP 429)" ;;
+            esac
+            if [ $busy -gt $max_busy ]; then
+                fail "$what; gave up after $max_busy retries." "Try again in a minute. $LOCAL_HINT"
+            fi
+            wait="$(retry_after 10)"
+            nap "$wait" "$what" "$what; retrying in ${wait}s (retry $busy of $max_busy)"
+            ;;
+        502 | 503 | 504)
+            # 503 shutting_down while the grader restarts, or the hosting
+            # proxy's own (non-JSON) page while no grader machine is up.
+            down=$((down + 1))
+            if [ "$JSON_OK" -eq 1 ]; then what="$(server_error)"; else what="HTTP $HTTP_CODE"; fi
+            if [ $down -gt $max_down ]; then
+                fail "the grader is restarting or unavailable ($what); try again in a minute." "$LOCAL_HINT"
+            fi
+            wait="$(retry_after 5)"
+            [ "$wait" -gt 10 ] && wait=10
+            nap "$wait" "the grader is unavailable ($what)" \
+                "the grader is restarting or unavailable ($what); retrying in ${wait}s"
+            ;;
+        301 | 302 | 303 | 307 | 308)
+            loc="$(hdr Location | LC_ALL=C tr -cd '\041-\176')"
+            fail "$API_HOST answered with a redirect (HTTP $HTTP_CODE${loc:+ to $loc}); the CLI does not follow redirects." \
+                "Set CPPATLAS_API to the grader's address (default https://run.cppatlas.com)."
+            ;;
+        *)
+            if [ "$JSON_OK" -eq 0 ]; then
+                fail "unexpected response (HTTP $HTTP_CODE) from $API_HOST: not the grader's JSON." \
+                    "Is CPPATLAS_API ($API) right? $LOCAL_HINT"
+            fi
+            case "$HTTP_CODE" in
+            400 | 413 | 415 | 422)
+                fail "the grader rejected the submission (HTTP $HTTP_CODE): $(server_error)${J_efield:+ [field: $J_efield]}" ;;
+            *)
+                fail "unexpected response (HTTP $HTTP_CODE) from $API_HOST: $(server_error)" "$LOCAL_HINT" ;;
+            esac
+            ;;
+        esac
+    done
+}
+
+# poll_run: long-poll GET /runs/{id} until a terminal status; leaves the final
+# snapshot's records in $TMPD/rec and J_* loaded. Never runs past DEADLINE.
+poll_run() {
+    local blips=0 backoff wait left mt last_state="queued" last_qpos="$1" problem started
+    while :; do
+        left=$((DEADLINE - SECONDS))
+        [ "$left" -gt 0 ] || give_up
+        # Short waits while queued so the switch to "running" shows up promptly.
+        if [ "$last_state" = queued ]; then wait=2; else wait=25; fi
+        [ $wait -gt $left ] && wait=$left
+        # Enough for the server to hold the long-poll, but not much past the deadline.
+        mt=$((wait + 20))
+        [ $mt -gt $((left + 2)) ] && mt=$((left + 2))
+        started=$SECONDS
+        http GET "$API/runs/$RUN_ID?wait=$wait" "$mt"
+        problem=""
+        if [ "$HTTP_RC" -ne 0 ]; then
+            problem="$(curl_problem "$HTTP_RC")"
+        else
+            flatten_body
+            case "$HTTP_CODE" in
+            200) [ "$JSON_OK" -eq 1 ] || problem="unexpected response (HTTP 200, not the grader's JSON)" ;;
+            404) fail "run $RUN_ID is no longer known to the grader ($(server_error)); it may have expired." \
+                "Submit again: ./cppatlas submit" ;;
+            429)
+                backoff="$(retry_after 5)"
+                nap "$backoff" "the grader asked to poll more slowly" "polling too fast; waiting ${backoff}s"
+                continue
+                ;;
+            *)
+                if [ "$JSON_OK" -eq 1 ]; then problem="HTTP $HTTP_CODE: $(server_error)"; else problem="HTTP $HTTP_CODE"; fi
+                ;;
+            esac
+        fi
+        if [ -n "$problem" ]; then
+            blips=$((blips + 1))
+            if [ $blips -gt 4 ]; then
+                fail "lost contact with the grader: $problem." \
+                    "Run $RUN_ID may still finish, but this command stopped waiting. Nothing was changed locally."
+            fi
+            backoff=$((1 << (blips - 1)))
+            nap "$backoff" "could not get the run status ($problem)" \
+                "could not get the run status ($problem); retrying in ${backoff}s"
+            continue
+        fi
+        blips=0
+        case "$J_status" in
+        queued)
+            if [ "$J_qpos" != "$last_qpos" ]; then
+                say "queued${J_qpos:+ (position $J_qpos)}"
+                last_qpos="$J_qpos"
+            fi
+            ;;
+        running)
+            if [ "$last_state" != running ]; then
+                say "running ..."
+                T_RUNNING="$(now_ms)"
+            fi
+            ;;
+        completed | error | timeout) return 0 ;;
+        *) fail "unexpected run status '$J_status' from $API_HOST (run $RUN_ID)." ;;
+        esac
+        last_state="$J_status"
+        # A degraded long-poll (or any instant answer) means: poll again, but
+        # not in a tight loop.
+        if [ "$(hdr X-Long-Poll)" = degraded ] || [ $SECONDS -eq $started ]; then nap 1; fi
+    done
+}
+
+# ---- rendering
+
+STAGE_TAG=""
+tline() {
+    if [ $# -eq 0 ] || [ -z "$1" ]; then
+        printf '%s\n' "$STAGE_TAG"
+    else
+        printf '%s %s\n' "$STAGE_TAG" "$1"
+    fi
+}
+
+# tfile FILE INDENT LIMIT HOWMORE: print FILE as tester lines, capped at LIMIT
+# lines unless -v.
+tfile() {
+    local f="$1" ind="$2" limit="$3" total line i=0
+    [ -s "$f" ] || return 0
+    total="$(wc -l <"$f" | tr -d ' ')"
+    [ $VERBOSE -eq 1 ] && limit="$total"
+    while IFS= read -r line; do
+        i=$((i + 1))
+        [ $i -gt "$limit" ] && break
+        tline "$ind$line"
+    done <"$f"
+    if [ "$total" -gt "$limit" ]; then
+        tline "$ind${C_DIM}... $((total - limit)) more lines (use -v)${C_OFF}"
+    fi
+}
+
+stage_reset() {
+    ST_N="" ST_STATUS="" ST_PHASE="" ST_SIGNAL="" ST_EXIT="" ST_RUNNING="" ST_BUILD="" ST_RUN=""
+    ST_TOTAL="" ST_PASSED="" ST_FAILED="" ST_CTRUNC="" ST_ECOUNT="" ST_OTRUNC=""
+    : >"$TMPD/st_hint"; : >"$TMPD/st_fe"; : >"$TMPD/st_pre"; : >"$TMPD/st_cout"
+    : >"$TMPD/st_tests"; : >"$TMPD/st_out"
+}
+
+render_counts() {
+    [ -n "$ST_TOTAL" ] || return 0
+    tline "${ST_PASSED:-0} of $ST_TOTAL test cases passed${ST_RUN:+ ($ST_RUN ms)}"
+}
+
+render_tests() { # render_tests: ✓ / ✗ lines with failure messages
+    local line k v name
+    while IFS= read -r line; do
+        k="${line%%"$TAB"*}"
+        v="${line#*"$TAB"}"
+        case "$k" in
+        T)
+            name="${v#*"$TAB"}"
+            if [ "${v%%"$TAB"*}" = passed ]; then
+                tline "${C_OK}✓${C_OFF} $name"
+            else
+                tline "${C_BAD}✗${C_OFF} $name"
+            fi
+            ;;
+        m) tline "    $v" ;;
+        esac
+    done <"$TMPD/st_tests"
+}
+
+render_compile_error() {
+    local n="$1" has_pre=0 has_fe=0 line
+    [ -s "$TMPD/st_pre" ] && has_pre=1
+    [ -s "$TMPD/st_fe" ] && has_fe=1
+    tline "${C_BAD}✗ does not compile${C_OFF}"
+    if [ $has_fe -eq 1 ]; then
+        while IFS= read -r line; do tline "  ${C_BOLD}first error: $line${C_OFF}"; done <"$TMPD/st_fe"
+    fi
+    if [ $VERBOSE -eq 1 ] && [ -s "$TMPD/st_cout" ]; then
+        tline "  Compiler output:"
+        tfile "$TMPD/st_cout" "  " 0
+        [ -n "$ST_CTRUNC" ] && tline "  ${C_DIM}(output truncated by the grader)${C_OFF}"
+        [ $has_pre -eq 1 ] && tline
+    elif [ $has_fe -eq 1 ] || { [ $has_pre -eq 0 ] && [ -s "$TMPD/st_cout" ]; }; then
+        # Real compiler errors first: they may be the reason members look missing.
+        if [ $has_pre -eq 1 ]; then
+            drop_preflight_blocks "$TMPD/st_cout" >"$TMPD/st_shown"
+            tline "  Compiler errors (fix these first):"
+        else
+            cp "$TMPD/st_cout" "$TMPD/st_shown"
+            case "$ST_ECOUNT" in
+            '' | 0) tline "  Compiler output:" ;;
+            1) tline "  Compiler output (1 error):" ;;
+            *) tline "  Compiler output ($ST_ECOUNT errors):" ;;
+            esac
+        fi
+        tfile "$TMPD/st_shown" "  " 60
+        [ -n "$ST_CTRUNC" ] && tline "  ${C_DIM}(output truncated by the grader)${C_OFF}"
+        [ $has_pre -eq 1 ] && tline
+    fi
+    if [ $has_pre -eq 1 ]; then
+        tline "  Your vector is missing something this stage needs:"
+        while IFS= read -r line; do tline "    ${C_BOLD}- $line${C_OFF}"; done <"$TMPD/st_pre"
+    elif [ $has_fe -eq 0 ] && [ ! -s "$TMPD/st_cout" ]; then
+        tline "  (the grader reported no compiler output)"
+    fi
+}
+
+render_stage() {
+    local n="$ST_N" detailed=0 build line
+    [ -n "$n" ] || return 0
+    STAGE_TAG="${C_TAG}[tester::#$n]${C_OFF}"
+    if [ "$ST_STATUS" = skipped ]; then
+        echo "${C_DIM}[tester::#$n] skipped${C_OFF}"
+        return 0
+    fi
+    tline "Running tests for Stage #$n: $(title_of "$n")"
+    if [ $VERBOSE -eq 1 ] || [ "$ST_STATUS" != passed ] || [ "$n" = "$SUB_LAST" ]; then detailed=1; fi
+    if [ $detailed -eq 0 ]; then
+        render_counts
+        tline "${C_OK}Test passed.${C_OFF}"
+        STAGES_PASSED=$((STAGES_PASSED + 1))
+        return 0
+    fi
+    if [ "$ST_STATUS" != compile_error ] && ! { [ "$ST_STATUS" = timeout ] && [ "$ST_PHASE" = build ]; }; then
+        build="$ST_BUILD"
+        case "$build" in '' | 0) build="$J_tbuild" ;; esac
+        tline "${C_DIM}compiled${J_compiler:+ with $J_compiler}${J_preset:+ ($J_preset)}${build:+ in $(fmt_s "$build")}${C_OFF}"
+    fi
+    case "$ST_STATUS" in
+    passed)
+        render_tests
+        render_counts
+        tline "${C_OK}Test passed.${C_OFF}"
+        STAGES_PASSED=$((STAGES_PASSED + 1))
+        return 0
+        ;;
+    compile_error)
+        render_compile_error "$n"
+        ;;
+    failed)
+        render_tests
+        if ! grep -q "^T${TAB}failed" "$TMPD/st_tests" && [ -s "$TMPD/st_out" ]; then
+            tline "  Test output:"
+            tfile "$TMPD/st_out" "  " 60
+        fi
+        render_counts
+        ;;
+    timeout | crashed)
+        render_tests
+        if [ "$ST_STATUS" = timeout ]; then
+            tline "${C_BAD}✗ timed out${ST_PHASE:+ (during the $ST_PHASE phase)}${C_OFF}"
+        else
+            tline "${C_BAD}✗ crashed${ST_SIGNAL:+ with $ST_SIGNAL}${ST_PHASE:+ (during the $ST_PHASE phase)}${C_OFF}"
+        fi
+        [ -n "$ST_RUNNING" ] && tline "  while running the test case \"$ST_RUNNING\""
+        [ -n "$ST_EXIT" ] && [ -z "$ST_SIGNAL" ] && tline "  exit code $ST_EXIT"
+        if [ -s "$TMPD/st_hint" ]; then
+            while IFS= read -r line; do tline "  -> $line"; done <"$TMPD/st_hint"
+        elif [ "$ST_STATUS" = timeout ]; then
+            tline "  -> an infinite loop? (e.g. growing capacity 0 * 2 == 0 forever)"
+        fi
+        if [ "$ST_STATUS" = crashed ] && [ "$PRESET" != asan-ubsan ]; then
+            tline "  -> ./cppatlas submit --sanitize gives a precise report (AddressSanitizer + UBSan)"
+        fi
+        if [ -s "$TMPD/st_out" ]; then
+            tline "  Output before it stopped${ST_OTRUNC:+ (truncated by the grader)}:"
+            tfile "$TMPD/st_out" "    " 60
+        fi
+        render_counts
+        ;;
+    *)
+        tline "${C_BAD}✗ $ST_STATUS${C_OFF}"
+        tfile "$TMPD/st_out" "  " 60
+        ;;
+    esac
+    tline "${C_BAD}Test failed.${C_OFF} Read $SPEC_BASE/$(slug_of "$n")"
+}
+
+render_result() {
+    local line k v
+    STAGES_PASSED=0
+    stage_reset
+    while IFS= read -r line; do
+        k="${line%%"$TAB"*}"
+        v="${line#*"$TAB"}"
+        case "$k" in
+        S) render_stage; stage_reset; ST_N="$v" ;;
+        s_status) ST_STATUS="$v" ;;
+        phase) ST_PHASE="$v" ;;
+        signal) ST_SIGNAL="$v" ;;
+        exit_code) ST_EXIT="$v" ;;
+        running) ST_RUNNING="$v" ;;
+        build_ms) ST_BUILD="$v" ;;
+        run_ms) ST_RUN="$v" ;;
+        n_total) ST_TOTAL="$v" ;;
+        n_passed) ST_PASSED="$v" ;;
+        n_failed) ST_FAILED="$v" ;;
+        ctrunc) ST_CTRUNC=1 ;;
+        otrunc) ST_OTRUNC=1 ;;
+        ecount) ST_ECOUNT="$v" ;;
+        hint) printf '%s\n' "$v" >>"$TMPD/st_hint" ;;
+        fe) printf '%s\n' "$v" >>"$TMPD/st_fe" ;;
+        pre) printf '%s\n' "$v" >>"$TMPD/st_pre" ;;
+        cout) printf '%s\n' "$v" >>"$TMPD/st_cout" ;;
+        out) printf '%s\n' "$v" >>"$TMPD/st_out" ;;
+        T | m) printf '%s\n' "$line" >>"$TMPD/st_tests" ;;
+        esac
+    done <"$TMPD/rec"
+    render_stage
+}
+
+cmd_submit() {
+    pick_json_tool
+    case "$API" in
+    http://* | https://*) ;;
+    *) die "CPPATLAS_API must start with http:// or https:// (got '$API')" ;;
+    esac
+    API_HOST="${API#*://}"
+    API_HOST="${API_HOST%%/*}"
+    SUBMIT_TIMEOUT="${CPPATLAS_SUBMIT_TIMEOUT:-300}"
+    case "$SUBMIT_TIMEOUT" in
+    '' | *[!0-9]* | ??????*) die "CPPATLAS_SUBMIT_TIMEOUT must be a number of seconds (got '$SUBMIT_TIMEOUT')" ;;
+    esac
+    SUBMIT_TIMEOUT=$((10#$SUBMIT_TIMEOUT))
+    [ "$SUBMIT_TIMEOUT" -ge 1 ] || die "CPPATLAS_SUBMIT_TIMEOUT must be at least 1 second"
+    SUB_COMPILER="${COMPILER:-gcc}"
+
+    local first=1 last only=0 FROM_PROGRESS=0 range
+    if [ -n "$ONLY" ]; then
+        first="$ONLY"; last="$ONLY"; only=1
+    elif [ -n "$UPTO" ]; then
+        last="$UPTO"
+    else
+        read_progress
+        last="$CURRENT_STAGE"
+        FROM_PROGRESS=1
+    fi
+    SUB_LAST="$last"
+    if [ "$first" = "$last" ]; then range="stage $last"; else range="stages $first..$last"; fi
+
+    check_submit_file
+    TMPD="$(mktemp -d "${TMPDIR:-/tmp}/cppatlas.XXXXXX")" || die "could not create a temporary directory"
+    trap 'rm -rf "$TMPD"' EXIT
+    INT_TRAP=on_submit_int
+    trap on_submit_int INT
+    build_request "$last" "$only"
+
+    local t0 t_end
+    t0="$(now_ms)"
+    T_RUNNING=""
+    say "submitting $SUBMIT_FILE_REL for $range ($SUB_COMPILER, $PRESET) to $API_HOST"
+    DEADLINE=$((SECONDS + SUBMIT_TIMEOUT))
+    post_run
+    say "queued${J_qpos:+ (position $J_qpos)}"
+    poll_run "$J_qpos"
+    t_end="$(now_ms)"
+
+    case "$J_status" in
+    error)
+        fail "the grader could not run your code (${J_ecode:-error}${J_emsg:+: $J_emsg})." \
+            "This is a problem on the grader's side, not with your code. Try again in a minute (run $RUN_ID)." \
+            "$LOCAL_HINT"
+        ;;
+    timeout)
+        fail "the run took longer than the grader allows and was stopped${J_emsg:+ ($J_emsg)}." \
+            "This is usually a problem on the grader's side, not with your code. Try again in a minute (run $RUN_ID)." \
+            "$LOCAL_HINT"
+        ;;
+    esac
+    if [ "$J_rstatus" = error ] || [ -z "$J_passed" ]; then
+        fail "the grader could not finish grading (${J_recode:-${J_ecode:-no result}}${J_remsg:+: $J_remsg})." \
+            "This is a problem on the grader's side, not with your code. Try again in a minute (run $RUN_ID)."
+    fi
+
+    render_result
+
+    local wall=$((t_end - t0)) timing
+    timing="finished in $(fmt_s "$wall")"
+    if [ -n "$T_RUNNING" ]; then timing="$timing (queued $(fmt_s $((T_RUNNING - t0))))"; fi
+    if [ -n "$J_ttotal" ]; then
+        timing="$timing; grader: total $(fmt_s "$J_ttotal"), build $(fmt_s "${J_tbuild:-0}"), tests $(fmt_s "${J_ttest:-0}")"
+    fi
+    say "$timing"
+
+    if [ "$J_passed" != true ]; then
+        exit 1
+    fi
+    # Advance only on a result that really covers every requested stage.
+    if [ "$STAGES_PASSED" -ne $((last - first + 1)) ]; then
+        fail "the grader reported a pass, but only $STAGES_PASSED of the $((last - first + 1)) requested stages passed (run $RUN_ID)." \
+            "This is a problem on the grader's side. Nothing was changed locally."
+    fi
+    report_pass "$FROM_PROGRESS" "$last" "$STAGES_PASSED"
+    exit 0
+}
+
+# ------------------------------------------------------------------- doctor
+D_WARNS=0
+d_ok() { echo "  ${C_OK}ok${C_OFF}    $*"; }
+d_warn() { echo "  ${C_BAD}warn${C_OFF}  $*"; D_WARNS=$((D_WARNS + 1)); }
+d_info() { echo "  ${C_DIM}info${C_OFF}  $*"; }
+
+# cxx_info CXX -> CK_KIND (gcc|clang|apple|unknown), CK_MAJOR, CK_VER
+cxx_info() {
+    local v
+    CK_KIND=unknown CK_MAJOR="" CK_VER=""
+    v="$("$1" --version 2>/dev/null | head -n 1)"
+    CK_VER="$v"
+    case "$v" in
+    *"Apple clang"*)
+        CK_KIND=apple
+        CK_MAJOR="$(echo "$v" | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p')"
+        ;;
+    *clang*)
+        CK_KIND=clang
+        CK_MAJOR="$(echo "$v" | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p')"
+        ;;
+    *g++* | *GCC* | *gcc* | *"Free Software"*)
+        CK_KIND=gcc
+        CK_MAJOR="$("$1" -dumpfullversion -dumpversion 2>/dev/null | cut -d. -f1)"
+        ;;
+    esac
+}
+
+# real_path FILE -> FILE with symlinked directories resolved (good enough to dedupe)
+real_path() {
+    local d
+    d="$(cd -P "$(dirname "$1")" 2>/dev/null && pwd -P)" || { echo "$1"; return; }
+    echo "$d/$(basename "$1")"
+}
+
+cmd_doctor() {
+    echo "${C_BOLD}cppatlas doctor${C_OFF}: checks this machine for LOCAL testing (./cppatlas test)."
+    echo "  ./cppatlas submit needs none of the build tools below, only curl and python3 or jq."
+    local local_ok=1 v cxx cxx_path tmp="" sysroot="" c p seen="" probe_ok=0
+
+    echo
+    echo "${C_BOLD}submit${C_OFF}"
+    if have curl; then d_ok "curl $(curl --version 2>/dev/null | head -n 1 | awk '{print $2}')"; else d_warn "curl not found: ./cppatlas submit needs it"; fi
+    if have jq && jq -n --rawfile x /dev/null '1' >/dev/null 2>&1; then
+        d_ok "jq $(jq --version 2>/dev/null | sed 's/^jq-//')"
+    elif have jq; then
+        d_info "jq $(jq --version 2>/dev/null) is too old (needs 1.6+ for --rawfile)"
+    else
+        d_info "jq not found"
+    fi
+    if have python3; then d_ok "python3 $(python3 --version 2>&1 | awk '{print $2}')"; else d_info "python3 not found"; fi
+    if ! have python3 && ! { have jq && jq -n --rawfile x /dev/null '1' >/dev/null 2>&1; }; then
+        d_warn "./cppatlas submit needs jq (1.6+) or python3; install one"
+    fi
+
+    echo
+    echo "${C_BOLD}build tools${C_OFF}"
+    if have cmake; then
+        v="$(cmake --version 2>/dev/null | head -n 1 | awk '{print $3}')"
+        local maj min
+        maj="$(echo "$v" | cut -d. -f1)"; min="$(echo "$v" | cut -d. -f2)"
+        case "$maj$min" in '' | *[!0-9]*) maj=0; min=0 ;; esac
+        if [ "$maj" -gt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -ge 25 ]; }; then
+            d_ok "cmake $v"
+        else
+            d_warn "cmake $v is too old: CMakePresets.json needs 3.25 or newer"; local_ok=0
+        fi
+    else
+        d_warn "cmake not found (needs 3.25 or newer)"; local_ok=0
+    fi
+    if have ninja; then d_ok "ninja $(ninja --version 2>/dev/null)"; else d_warn "ninja not found"; local_ok=0; fi
+
+    echo
+    echo "${C_BOLD}compiler${C_OFF} (the grader uses GCC 16.2 by default, or Clang 21 with --compiler clang)"
+    if [ -n "${CXX:-}" ]; then cxx="$CXX"; else cxx="c++"; fi
+    cxx_path="$(command -v "$cxx" 2>/dev/null || true)"
+    if [ -z "$cxx_path" ]; then
+        if [ -n "${CXX:-}" ]; then d_warn "CXX=$CXX not found"; else d_warn "no c++ compiler on PATH"; fi
+        local_ok=0
+    else
+        cxx_info "$cxx_path"
+        if [ -n "${CXX:-}" ]; then p="CXX=$CXX"; else p="c++ (CMake's default; set CXX to change it)"; fi
+        case "$CK_KIND" in
+        gcc)
+            if [ "$CK_MAJOR" = 16 ]; then d_ok "./cppatlas test uses $p: $CK_VER, the grader's GCC major version"
+            else d_warn "./cppatlas test uses $p: $CK_VER; the grader uses GCC 16.2, results may differ"; fi ;;
+        clang)
+            if [ "$CK_MAJOR" = 21 ]; then d_ok "./cppatlas test uses $p: $CK_VER, the grader's Clang major version"
+            else d_warn "./cppatlas test uses $p: $CK_VER; the grader uses Clang 21, results may differ"; fi ;;
+        apple)
+            d_warn "./cppatlas test uses $p: $CK_VER; Apple clang is not the grader's GCC 16.2 / Clang 21 (different standard library), results may differ" ;;
+        *)
+            d_warn "./cppatlas test uses $p: ${CK_VER:-unknown version}; could not tell which compiler this is" ;;
+        esac
+        seen=" $(real_path "$cxx_path") "
+    fi
+    for c in g++-16 clang++-21 /opt/homebrew/bin/g++-16 /usr/local/bin/g++-16 \
+        /opt/homebrew/opt/llvm/bin/clang++ /opt/homebrew/opt/llvm@21/bin/clang++ \
+        /usr/local/opt/llvm/bin/clang++ /usr/local/opt/llvm@21/bin/clang++ g++ clang++; do
+        p="$(command -v "$c" 2>/dev/null || true)"
+        [ -n "$p" ] && [ -x "$p" ] || continue
+        v="$(real_path "$p")"
+        case "$seen" in *" $v "*) continue ;; esac
+        seen="$seen $v "
+        cxx_info "$p"
+        case "$CK_KIND" in
+        gcc) if [ "$CK_MAJOR" = 16 ]; then d_info "found $p ($CK_VER), like the grader: CXX=$p ./cppatlas test"; else d_info "also found $p ($CK_VER)"; fi ;;
+        clang) if [ "$CK_MAJOR" = 21 ]; then d_info "found $p ($CK_VER), like the grader's clang: CXX=$p ./cppatlas test"; else d_info "also found $p ($CK_VER)"; fi ;;
+        *) d_info "also found $p (${CK_VER:-unknown})" ;;
+        esac
+    done
+
+    if [ -n "$cxx_path" ]; then
+        tmp="$(mktemp -d "${TMPDIR:-/tmp}/cppatlas-doctor.XXXXXX" 2>/dev/null)" || tmp=""
+    fi
+    if [ -n "$cxx_path" ] && [ -z "$tmp" ]; then
+        d_warn "could not create a temporary directory in ${TMPDIR:-/tmp}; skipped the compiler probes"
+    elif [ -n "$cxx_path" ]; then
+        DOCTOR_TMP="$tmp"
+        trap 'rm -rf "$DOCTOR_TMP"' EXIT
+        if [ "$(uname -s)" = Darwin ] && [ -z "${SDKROOT:-}" ] && have xcrun; then
+            sysroot="$(xcrun --show-sdk-path 2>/dev/null || true)"
+        fi
+        # The library and language features the stage tests rely on.
+        cat >"$tmp/probe.cpp" <<'EOF'
+#include <algorithm>
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <new>
+#include <ranges>
+#include <span>
+#include <string>
+#include <type_traits>
+#include <utility>
+struct Item { std::string s; };
+template <class T>
+concept Sized = requires(const T& t) { { t.size() } -> std::convertible_to<std::size_t>; };
+int main() {
+    alignas(Item) unsigned char raw[sizeof(Item) * 2];
+    Item* p = reinterpret_cast<Item*>(raw);
+    std::construct_at(p, Item{"a"});
+    std::construct_at(p + 1, Item{"b"});
+    std::span<Item> sp(p, 2);
+    static_assert(std::contiguous_iterator<Item*>);
+    static_assert(std::ranges::contiguous_range<std::span<Item>> && Sized<std::span<Item>>);
+    static_assert(std::is_nothrow_move_constructible_v<Item>);
+    int a[3] = {3, 1, 2};
+    std::ranges::sort(a, std::ranges::greater{});
+    bool ok = std::ranges::distance(sp) == 2 && a[0] == 3 && sp[1].s == "b";
+    std::destroy_at(p + 1);
+    std::destroy_at(p);
+    return ok ? 0 : 1;
+}
+EOF
+        # Every probe step runs under a timeout so a stuck compiler cannot hang doctor.
+        run_with_timeout 90 "$tmp/probe.log" "$cxx_path" -std=c++23 ${sysroot:+-isysroot "$sysroot"} "$tmp/probe.cpp" -o "$tmp/probe"
+        if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+            echo "(the compiler did not finish within 90s and was stopped)" >>"$tmp/probe.log"
+        elif [ "$RUN_RC" -eq 0 ]; then
+            run_with_timeout 10 "$tmp/probe.run" "$tmp/probe"
+            if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+                echo "(the probe program did not finish within 10s and was stopped)" >>"$tmp/probe.log"
+            elif [ "$RUN_RC" -eq 0 ]; then
+                probe_ok=1
+            else
+                echo "(the probe program exited with status $RUN_RC)" >>"$tmp/probe.log"
+            fi
+        fi
+        if [ $probe_ok -eq 1 ]; then
+            d_ok "C++23 probe (-std=c++23, construct_at, ranges, concepts, span) compiles and runs"
+        else
+            d_warn "C++23 probe failed with $cxx; this compiler probably cannot build the tests:"
+            sed -e "s|$tmp/||g" "$tmp/probe.log" | head -n 6 | sed 's/^/          /'
+            local_ok=0
+        fi
+        if [ $probe_ok -eq 1 ]; then
+            cat >"$tmp/san.cpp" <<'EOF'
+#include <string>
+#include <vector>
+int main() { auto* v = new std::vector<std::string>(3, std::string(64, 'x')); int ok = v->size() == 3; delete v; return ok ? 0 : 1; }
+EOF
+            run_with_timeout 90 "$tmp/san.log" "$cxx_path" -std=c++23 ${sysroot:+-isysroot "$sysroot"} \
+                -fsanitize=address,undefined -g "$tmp/san.cpp" -o "$tmp/san"
+            if [ "$RUN_RC" -ne 0 ] || [ "$RUN_TIMED_OUT" -eq 1 ]; then
+                d_warn "sanitizers (-fsanitize=address,undefined) do not build with $cxx; use the debug preset locally or ./cppatlas submit --sanitize"
+            else
+                run_with_timeout 8 "$tmp/san.run" "$tmp/san"
+                if [ $RUN_TIMED_OUT -eq 1 ]; then
+                    d_warn "an AddressSanitizer program built with $cxx hangs at start-up (a known Homebrew LLVM issue on macOS); the asan-ubsan preset works around it by linking Apple's runtime"
+                elif [ "$RUN_RC" -ne 0 ]; then
+                    d_warn "an AddressSanitizer program built with $cxx fails to run (exit $RUN_RC); use the debug preset locally or ./cppatlas submit --sanitize"
+                else
+                    d_ok "sanitizers (-fsanitize=address,undefined) build and run"
+                fi
+            fi
+            if [ "$(uname -s)" = Darwin ]; then
+                d_info "macOS has no LeakSanitizer: local asan-ubsan runs do not report leaks (the grader runs on Linux and does)"
+            fi
+        fi
+    fi
+
+    echo
+    echo "${C_BOLD}challenge${C_OFF}"
+    if [ ! -f "$PROGRESS_FILE" ]; then
+        d_warn ".cppatlas.json not found; create it with: echo '{\"challenge\":\"vector\",\"stage\":1}' > .cppatlas.json"
+    else
+        local flat st ch
+        flat="$(tr -d ' \t\r\n' <"$PROGRESS_FILE")"
+        st="$(echo "$flat" | sed -n 's/.*"stage":\([0-9][0-9]*\)[,}].*/\1/p')"
+        ch="$(echo "$flat" | sed -n 's/.*"challenge":"\([^"]*\)".*/\1/p')"
+        case "$flat" in "{"*"}") ;; *) st="" ;; esac
+        if [ -z "$st" ]; then
+            d_warn ".cppatlas.json is not valid (expected {\"challenge\":\"vector\",\"stage\":1})"
+        elif [ "$ch" != vector ]; then
+            d_warn ".cppatlas.json: challenge is '${ch}', expected 'vector'"
+        elif [ "$st" -lt 1 ] || [ "$st" -gt $MAX_STAGE ]; then
+            d_warn ".cppatlas.json: stage $st is not between 1 and $MAX_STAGE"
+        else
+            d_ok ".cppatlas.json: stage $st ($(title_of "$st"))"
+        fi
+    fi
+    if [ -s "$ROOT/$SUBMIT_FILE_REL" ]; then d_ok "$SUBMIT_FILE_REL"; else d_warn "$SUBMIT_FILE_REL is missing or empty"; fi
+
+    echo
+    echo "${C_BOLD}grader${C_OFF}"
+    if have curl; then
+        local res code secs
+        res="$(curl -s --proto '=http,https' -o /dev/null -w '%{http_code} %{time_total}' --connect-timeout 5 --max-time 8 \
+            -A "$UA" "$API/healthz" 2>/dev/null)" || true
+        code="${res%% *}"; secs="$(LC_ALL=C awk -v t="${res#* }" 'BEGIN { printf "%.2f", t }' 2>/dev/null)"
+        if [ "$code" = 200 ]; then
+            d_ok "$API is reachable (healthz in ${secs}s)"
+        else
+            [ "$code" = 000 ] && code="no answer"; d_warn "$API is not reachable (${code:-no answer}); ./cppatlas submit needs it"
+        fi
+    fi
+
+    echo
+    if [ $local_ok -eq 1 ]; then
+        if [ $D_WARNS -gt 0 ]; then
+            echo "${C_OK}summary${C_OFF}: local ./cppatlas test should work ($D_WARNS warning(s) above)."
+        else
+            echo "${C_OK}summary${C_OFF}: local ./cppatlas test should work."
+        fi
+    else
+        echo "${C_BAD}summary${C_OFF}: local ./cppatlas test will probably not work; see the warnings above."
+    fi
+    echo "  ./cppatlas submit needs none of this, only curl and python3 or jq."
     exit 0
 }
 
 case "$cmd" in
+submit) cmd_submit ;;
 test) cmd_test ;;
+doctor) cmd_doctor ;;
 stages)
     for n in 1 2 3 4 5 6 7 8; do
         if stage_exists $n; then s=""; else s=" (no tests yet)"; fi

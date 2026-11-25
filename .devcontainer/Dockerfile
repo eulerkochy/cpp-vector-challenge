@@ -28,7 +28,7 @@ ARG USER_GID=1000
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates ccache cmake curl gdb git gnupg ninja-build openssh-client sudo \
+      ca-certificates ccache cmake curl gdb git gnupg jq ninja-build openssh-client sudo \
  && install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm.asc \
  && gpg --show-keys --with-colons /tmp/llvm.asc | awk -F: '/^fpr/ {print $10}' | grep -qx "${LLVM_FPR}" \
