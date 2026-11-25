@@ -24,6 +24,8 @@ concurrency:
 jobs:
   stages:
     name: ${{ matrix.compiler }} / ${{ matrix.preset }}
+    # Skip on the template repo itself: it ships the unsolved starter, so it would always be red.
+    if: github.repository != 'eulerkochy/cpp-vector-challenge'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -39,7 +41,7 @@ jobs:
       # Actions are pinned to major versions for readability. For stricter
       # supply-chain hygiene, pin each to a full commit SHA instead
       # (e.g. actions/checkout@<sha> # v4) and let Dependabot update them.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read the current stage from .cppatlas.json
         id: stage
@@ -66,7 +68,7 @@ jobs:
             'g++ --version | head -n 1; clang++-21 --version | head -n 1; cmake --version | head -n 1'
 
       - name: Cache ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .ccache
           key: ccache-${{ matrix.compiler }}-${{ matrix.preset }}-${{ hashFiles('include/**', 'tests/**', 'CMakeLists.txt', 'cmake/**', '.devcontainer/Dockerfile') }}
